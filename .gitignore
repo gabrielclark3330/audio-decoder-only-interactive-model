@@ -1,5 +1,5 @@
-/lexscrape2
-/lexscrapesegmented
-/wandb
-/.ipynb_checkpoints
+**/wandb/
+**/data/
+/lexaudio/
 *.pt
+**/.ipynb_checkpoints/
