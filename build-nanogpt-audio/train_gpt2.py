@@ -72,7 +72,7 @@ class Block(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 2048 # max sequence length
-    vocab_size: int = 16384 # number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
+    vocab_size: int =  16384 #4096# number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
     n_layer: int = 12 # number of layers
     n_head: int = 12 # number of heads
     n_embd: int = 768 # embedding dimension
@@ -221,10 +221,14 @@ class DataLoaderLite:
 
         # get the shard filenames
         data_root = "./data"
-        shards = os.listdir(data_root)
+        shards = [] #[x for x in os.listdir(data_root)]
+        for entry in os.listdir(data_root):
+            full_path = os.path.join(data_root, entry)
+            for nested_entry in os.listdir(full_path):
+                shards.append(os.path.join(full_path, nested_entry))
         shards = [s for s in shards if split in s]
         shards = sorted(shards)
-        shards = [os.path.join(data_root, s) for s in shards]
+        #shards = [os.path.join(data_root, s) for s in shards]
         self.shards = shards
         assert len(shards) > 0, f"no shards found for split {split}"
         if master_process:
@@ -239,16 +243,33 @@ class DataLoaderLite:
 
     def next_batch(self):
         B, T = self.B, self.T
-        buf = self.tokens[self.current_position : self.current_position+B*T+1]
-        x = (buf[:-1]).view(B, T) # inputs
-        y = (buf[1:]).view(B, T) # targets
+        tokens_needed = B * T + 1
+        buf = torch.empty(0, dtype=torch.long)
+
+        while len(buf) < tokens_needed:
+            remaining_tokens = len(self.tokens) - self.current_position
+            if remaining_tokens > 0:
+                tokens_to_add = min(tokens_needed - len(buf), remaining_tokens)
+                buf = torch.cat([buf, self.tokens[self.current_position:self.current_position + tokens_to_add]])
+                self.current_position += tokens_to_add
+            if len(buf) < tokens_needed:
+                # Load the next shard if current shard is exhausted
+                self.current_shard = (self.current_shard + 1) % len(self.shards)
+                self.tokens = load_tokens(self.shards[self.current_shard])
+                self.current_position = 0
+
+        #buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        x = (buf[:tokens_needed-1]).view(B, T) # inputs
+        y = (buf[1:tokens_needed]).view(B, T) # targets
         # advance the position in the tensor
         self.current_position += B * T * self.num_processes
+        '''
         # if loading the next batch would be out of bounds, advance to next shard
         if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
             self.current_shard = (self.current_shard + 1) % len(self.shards)
             self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = B * T * self.process_rank
+        '''
         return x, y
 
 # -----------------------------------------------------------------------------
@@ -319,7 +340,7 @@ torch.set_float32_matmul_precision('high')
 
 # create model
 model = GPT(GPTConfig())
-
+'''
 original_state_dict = torch.load('./log/try2model_199000.pt')
 # Corrected state dictionary
 state_dict = {
@@ -332,6 +353,7 @@ state_dict = {
 }
 model.load_state_dict(state_dict['model'])
 # model = GPT.from_pretrained("gpt2") # or init from OpenAI GPT-2
+'''
 
 model.to(device)
 
@@ -344,8 +366,8 @@ raw_model = model.module if ddp else model # always contains the "raw" unwrapped
 
 max_lr = 0.0018
 min_lr = max_lr * 0.1
-max_steps = 1000000 # 850 = 10 epochs # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
-warmup_steps = int(max_steps*0.1)
+max_steps = 9000000 # 850 = 10 epochs # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+warmup_steps = 2000
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_steps:
@@ -396,7 +418,7 @@ for step in range(max_steps):
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step >= 0 and ((step % 1000 == 0) or last_step):
+            if step >= 0 and ((step % 100000 == 0) or last_step):
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:06d}.pt")
                 print(f"writing checkpoint to {checkpoint_path}")
@@ -409,12 +431,11 @@ for step in range(max_steps):
                 # you might also want to add optimizer.state_dict() and
                 # rng seeds etc., if you wanted to more exactly resume training
                 torch.save(checkpoint, checkpoint_path)
-    '''
     # once in a while generate from the model (except step 0, which is noise)
-    if ((step >= 0 and step % 100 == 0) or last_step) and (not use_compile):
+    if ((step >= 0 and step % 100000 == 0) or last_step) and (not use_compile):
         model.eval()
         num_return_sequences = 4
-        max_length = 32
+        max_length = 2048
         # hard code some val data
         tokens = [4097, 547, 426, 2825, 1441, 2209, 1300, 161, 4097, 1646]
         tokens = torch.tensor(tokens, dtype=torch.long)
@@ -443,11 +464,10 @@ for step in range(max_steps):
                 xgen = torch.cat((xgen, xcol), dim=1)
         # print the generated text
         for i in range(num_return_sequences):
-            tokens = xgen[i, :max_length].tolist()
             #decoded = enc.decode(tokens)
-            #np.write(f"./out/tokens{step}.npy", torch.from_numpy(tokens.cpu()))
+            with open(f"./out/tokens{step}.npy", 'wb') as f:
+                np.save(f, xgen[i, :max_length].cpu().detach().numpy())
             #print(f"rank {ddp_rank} sample {i}: {tokens}")
-    '''
 
     # do one step of the optimization
     model.train()
