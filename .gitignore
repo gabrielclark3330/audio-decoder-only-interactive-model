@@ -1,5 +1,6 @@
 **/wandb/
 **/data/
-/lexaudio/
 *.pt
 **/.ipynb_checkpoints/
+**/audiodata/
+**/lexaudio/
