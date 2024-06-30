@@ -1,5 +1,6 @@
 **/wandb/
 **/data/
+!"/build-nanogpt-audio/data/lex_npy/train_lex_Aaron Smith-Levin： Scientology ｜ Lex Fridman Podcast #361.mp3.npy"
 *.pt
 **/.ipynb_checkpoints/
 **/audiodata/
