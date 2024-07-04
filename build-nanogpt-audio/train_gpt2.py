@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 import numpy as np
+import random
 from collections import OrderedDict
 # -----------------------------------------------------------------------------
 
@@ -227,6 +228,7 @@ class DataLoaderLite:
             for nested_entry in os.listdir(full_path):
                 shards.append(os.path.join(full_path, nested_entry))
         shards = [s for s in shards if split in s]
+        #shards = random.shuffle(shards)
         shards = sorted(shards)
         #shards = [os.path.join(data_root, s) for s in shards]
         self.shards = shards
@@ -243,33 +245,22 @@ class DataLoaderLite:
 
     def next_batch(self):
         B, T = self.B, self.T
-        tokens_needed = B * T + 1
-        buf = torch.empty(0, dtype=torch.long)
-
-        while len(buf) < tokens_needed:
-            remaining_tokens = len(self.tokens) - self.current_position
-            if remaining_tokens > 0:
-                tokens_to_add = min(tokens_needed - len(buf), remaining_tokens)
-                buf = torch.cat([buf, self.tokens[self.current_position:self.current_position + tokens_to_add]])
-                self.current_position += tokens_to_add
-            if len(buf) < tokens_needed:
-                # Load the next shard if current shard is exhausted
-                self.current_shard = (self.current_shard + 1) % len(self.shards)
-                self.tokens = load_tokens(self.shards[self.current_shard])
-                self.current_position = 0
-
-        #buf = self.tokens[self.current_position : self.current_position+B*T+1]
-        x = (buf[:tokens_needed-1]).view(B, T) # inputs
-        y = (buf[1:tokens_needed]).view(B, T) # targets
-        # advance the position in the tensor
-        self.current_position += B * T * self.num_processes
-        '''
-        # if loading the next batch would be out of bounds, advance to next shard
-        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
-            self.current_shard = (self.current_shard + 1) % len(self.shards)
+        while len(self.tokens)<(B*T+1):
+            self.current_shard = random.randint(0, len(self.shards)-1)
             self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = B * T * self.process_rank
-        '''
+
+        buf = self.tokens[self.current_position : self.current_position+B*T+1]
+        x = (buf[:-1]).view(B, T) # inputs
+        y = (buf[1:]).view(B, T) # targets
+        # advance the position in the tensor
+        self.current_position += B * T * self.num_processes
+        # if loading the next batch would be out of bounds, advance to next shard
+        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
+            #self.current_shard = (self.current_shard + 1) % len(self.shards)
+            self.current_shard = random.randint(0, len(self.shards)-1)
+            self.tokens = load_tokens(self.shards[self.current_shard])
+            self.current_position = B * T * self.process_rank
         return x, y
 
 # -----------------------------------------------------------------------------
@@ -366,8 +357,8 @@ raw_model = model.module if ddp else model # always contains the "raw" unwrapped
 
 max_lr = 0.0018
 min_lr = max_lr * 0.1
-max_steps = 9000000 # 850 = 10 epochs # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
-warmup_steps = 2000
+max_steps = 500000 # 850 = 10 epochs # 19,073 steps is ~1 epoch, if data is 10B tokens and batch size 0.5M tokens
+warmup_steps = int(max_steps*0.1)
 def get_lr(it):
     # 1) linear warmup for warmup_iters steps
     if it < warmup_steps:
@@ -391,12 +382,13 @@ log_file = os.path.join(log_dir, f"log.txt")
 with open(log_file, "w") as f: # open for writing to clear the file
     pass
 
-for step in range(max_steps):
+step = 0
+while True:
     t0 = time.time()
-    last_step = (step == max_steps - 1)
+    #last_step = (step == max_steps - 1)
 
     # once in a while evaluate our validation loss
-    if step % 25 == 0 or last_step:
+    if step % 25 == 0:
         model.eval()
         val_loader.reset()
         with torch.no_grad():
@@ -418,7 +410,7 @@ for step in range(max_steps):
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step >= 0 and ((step % 100000 == 0) or last_step):
+            if step >= 0 and (step % 10000 == 0):
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:06d}.pt")
                 print(f"writing checkpoint to {checkpoint_path}")
@@ -432,7 +424,7 @@ for step in range(max_steps):
                 # rng seeds etc., if you wanted to more exactly resume training
                 torch.save(checkpoint, checkpoint_path)
     # once in a while generate from the model (except step 0, which is noise)
-    if ((step >= 0 and step % 100000 == 0) or last_step) and (not use_compile):
+    if ((step >= 0 and step % 10000 == 0)) and (not use_compile):
         model.eval()
         num_return_sequences = 4
         max_length = 2048
@@ -468,6 +460,7 @@ for step in range(max_steps):
             with open(f"./out/tokens{step}.npy", 'wb') as f:
                 np.save(f, xgen[i, :max_length].cpu().detach().numpy())
             #print(f"rank {ddp_rank} sample {i}: {tokens}")
+    step+=1
 
     # do one step of the optimization
     model.train()
@@ -501,6 +494,8 @@ for step in range(max_steps):
     dt = t1 - t0 # time difference in seconds
     tokens_processed = train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
     tokens_per_sec = tokens_processed / dt
+    if loss_accum.item() < 0.3:
+        print(f"Problematic sample!!! {train_loader.shards[train_loader.current_shard]}")
     if master_process:
         print(f"step {step:6d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
         with open(log_file, "a") as f:
