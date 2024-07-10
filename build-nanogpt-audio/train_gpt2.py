@@ -74,9 +74,9 @@ class Block(nn.Module):
 class GPTConfig:
     block_size: int = 2048 # max sequence length
     vocab_size: int =  16384 #4096# number of tokens: 50,000 BPE merges + 256 bytes tokens + 1 <|endoftext|> token
-    n_layer: int = 12 # number of layers
-    n_head: int = 12 # number of heads
-    n_embd: int = 768 # embedding dimension
+    n_layer: int = 24#12 # number of layers
+    n_head: int = 16#12 # number of heads
+    n_embd: int = 1024#768 # embedding dimension
 
 class GPT(nn.Module):
 
@@ -313,8 +313,8 @@ if torch.cuda.is_available():
 # B = 64 # micro batch size
 # T = 1024 # sequence length
 
-total_batch_size = 2048*16
-B = 16 # micro batch size
+total_batch_size = 2048*6
+B = 6 # micro batch size
 T = 2048 # sequence length
 
 assert total_batch_size % (B * T * ddp_world_size) == 0, "make sure total_batch_size is divisible by B * T * ddp_world_size"
@@ -410,7 +410,7 @@ while True:
             print(f"validation loss: {val_loss_accum.item():.4f}")
             with open(log_file, "a") as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step >= 0 and (step % 10000 == 0):
+            if step >= 0 and (step % 50000 == 0):
                 # optionally write model checkpoints
                 checkpoint_path = os.path.join(log_dir, f"model_{step:06d}.pt")
                 print(f"writing checkpoint to {checkpoint_path}")
@@ -424,7 +424,7 @@ while True:
                 # rng seeds etc., if you wanted to more exactly resume training
                 torch.save(checkpoint, checkpoint_path)
     # once in a while generate from the model (except step 0, which is noise)
-    if ((step >= 0 and step % 10000 == 0)) and (not use_compile):
+    if ((step >= 0 and step % 50000 == 0)) and (not use_compile):
         model.eval()
         num_return_sequences = 4
         max_length = 2048
